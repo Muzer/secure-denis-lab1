@@ -4,6 +4,12 @@
 #include <stdio.h>
 #include <arpa/inet.h>
 #include <sys/select.h>
+#include <string.h>
+#include <unistd.h>
+
+char buffer[2049];
+int evilAdminVariable = 0;
+char *rootPath = "/home/muzer/public_html";
 
 int initSocket(void)
 {
@@ -27,12 +33,113 @@ int initSocket(void)
     perror("listen()");
     return -1;
   }
+  int reuseaddr = 1;
+  setsockopt(sock, SOL_SOCKET, SO_REUSEADDR, &reuseaddr, sizeof(int));
   return sock;
+}
+
+int serveFile(int sock, char *path)
+{
+  char fullPath[2048+strlen(rootPath)];
+  strncpy(fullPath, rootPath, 2048+strlen(rootPath));
+  strncat(fullPath, path, 2048+strlen(rootPath));
+  printf("Serving path %s\n", fullPath);
+
+  FILE *f = fopen(fullPath, "r");
+  if(f == NULL)
+  {
+    char *error = "HTTP/1.0 404 Not Found\r\n";
+    send(sock, error, strlen(error), 0);
+    return -1;
+  }
+  char *status = "HTTP/1.0 200 OK\r\n\r\n";
+  
+  send(sock, status, strlen(status), 0);
+
+  while(!feof(f))
+  {
+    size_t bytesToWrite = fread(buffer, 1, 2048, f);
+    send(sock, buffer, bytesToWrite, 0);
+  }
+  return 1;
 }
 
 int doHttpStuff(int sock)
 {
+  buffer[2048] = '\0';
   printf("Doing HTTP stuff for socket %i\n", sock);
+  ssize_t receivedSize = recv(sock, buffer, 2048, 0);
+  if(receivedSize == -1)
+  {
+    perror("recv()");
+    return -1;
+  }
+  char *eol = NULL;
+  eol = memchr(buffer, '\n', 2048);
+  if(eol != buffer && eol != NULL && eol[-1] == '\r')
+    eol--;
+  if(eol == NULL) {
+    /* URL too long for IE so it's too long for us */
+    char *error = "HTTP/1.0 400 Bad Request\r\n";
+    send(sock, error, strlen(error), 0);
+    return -1;
+  }
+
+  if(strncmp(buffer, "GET ", 4) != 0)
+  {
+    char *error = "HTTP/1.0 501 Not Implemented\r\n";
+    send(sock, error, strlen(error), 0);
+    return -1;
+  }
+
+  char *startOfString = buffer + 4;
+  char *spaceChar = memchr(startOfString, ' ', 2048-4);
+  if(spaceChar == NULL)
+  {
+    char *error = "HTTP/1.0 400 Bad Request\r\n";
+    send(sock, error, strlen(error), 0);
+    return -1;
+  }
+
+  *spaceChar = '\0'; /* make it a real string */
+
+  /* Error if there's a .. in it or doesn't start with / */
+  if(strstr(startOfString, "/../") || strncmp(startOfString, "../", 3) == 0 ||
+      (spaceChar >= buffer + 3 && strncmp(spaceChar - 3, "/..", 3) == 0) ||
+      *startOfString != '/')
+  {
+    /* Evil path */
+    char *error = "HTTP/1.0 400 Bad Request\r\n";
+    send(sock, error, strlen(error), 0);
+    return -1;
+  }
+
+  if(strstr(spaceChar + 1, "\n\n") || strstr(spaceChar + 1, "\r\n\r\n"))
+  {
+    /* we've already found it */
+    return serveFile(sock, startOfString);
+  }
+
+  int endsWithNewline = 0;
+  if(buffer[receivedSize-1] == '\n')
+    endsWithNewline = 1;
+  while(1)
+  {
+    int len = recv(sock, buffer, 2048, 0);
+    if(endsWithNewline && len > 0 && (buffer[0] == '\n' || buffer[1] == '\n'))
+      return serveFile(sock, startOfString);
+    if(len == -1)
+    {
+      perror("recv()");
+      return -1;
+    }
+    if(strstr(buffer, "\n\n") || strstr(buffer, "\r\n\r\n"))
+    {
+      return serveFile(sock, startOfString);
+    }
+    if(len >= 1 && buffer[len-1] == '\n')
+      endsWithNewline = 1;
+  }
 
   printf("Done HTTP stuff for socket %i\n", sock);
   return 1;
@@ -52,7 +159,8 @@ int main(int argc, char **argv)
   {
     fd_set read_fds;
     FD_ZERO(&read_fds);
-    for(int i = 0; i < max_fd + 1; i++) {
+    int i;
+    for(i = 0; i < max_fd + 1; i++) {
       if(FD_ISSET(i, &fds))
         FD_SET(i, &read_fds);
     }
@@ -77,13 +185,24 @@ int main(int argc, char **argv)
         FD_SET(newSock, &fds);
         if(max_fd < newSock)
           max_fd = newSock;
+
+        /* timeout all reads after 30s */
+        struct timeval tv;
+        tv.tv_sec = 30;
+        tv.tv_usec = 0;
+        setsockopt(newSock, SOL_SOCKET, SO_RCVTIMEO, &tv,
+            sizeof(struct timeval));
+
         printf("Accepted some person\n");
       }
-      for(int i = 0; i < max_fd + 1; i++)
+      int i;
+      for(i = 0; i < max_fd + 1; i++)
       {
         if(FD_ISSET(i, &read_fds) && i != listenSock)
         {
           doHttpStuff(i);
+          close(i);
+          FD_CLR(i, &fds); /* It's now disconnected */
         }
       }
     }
