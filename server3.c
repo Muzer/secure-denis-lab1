@@ -8,9 +8,14 @@
 #include <unistd.h>
 #include <sys/stat.h>
 
-char buffer[2049];
-int evilAdminVariable = 0;
-char *rootPath = "/home/muzer/public_html";
+struct internal_data
+{
+  char buffer[2049];
+  char evilAdminVariable;
+  char *rootPath;
+};
+
+struct internal_data data;
 
 int initSocket(void)
 {
@@ -41,7 +46,7 @@ int initSocket(void)
 
 int serveFile(int sock, char *path)
 {
-  if(evilAdminVariable)
+  if(data.evilAdminVariable)
   {
     char *response = "HTTP/1.0 200 OK\r\n\r\n<!DOCTYPE html><html><head>"
       "<title>Welcome to the secret admin page</title></head><body><p>It's a"
@@ -49,9 +54,9 @@ int serveFile(int sock, char *path)
     send(sock, response, strlen(response), 0);
     return 1;
   }
-  char fullPath[2048+strlen(rootPath)+11]; /* 11 is length of "/index.html" */
-  strncpy(fullPath, rootPath, 2048+strlen(rootPath)+11);
-  strncat(fullPath, path, 2048+strlen(rootPath)+11);
+  char fullPath[2048+strlen(data.rootPath)+11];
+  strncpy(fullPath, data.rootPath, 2048+strlen(data.rootPath)+11);
+  strncat(fullPath, path, 2048+strlen(data.rootPath)+11);
   printf("Serving path %s\n", fullPath);
 
   FILE *f = fopen(fullPath, "r");
@@ -67,7 +72,7 @@ int serveFile(int sock, char *path)
   if((stat_struct.st_mode & S_IFMT) == S_IFDIR)
   {
     fclose(f);
-    strncat(fullPath, "/index.html", 2048+strlen(rootPath)+11);
+    strncat(fullPath, "/index.html", 2048+strlen(data.rootPath)+11);
     f = fopen(fullPath, "r");
     if(f == NULL)
     {
@@ -90,29 +95,29 @@ int serveFile(int sock, char *path)
 
   while(!feof(f))
   {
-    size_t bytesToWrite = fread(buffer, 1, 2048, f);
+    size_t bytesToWrite = fread(data.buffer, 1, 2048, f);
     if(bytesToWrite == 0)
     {
       return -1;
     }
-    send(sock, buffer, bytesToWrite, 0);
+    send(sock, data.buffer, bytesToWrite, 0);
   }
   return 1;
 }
 
 int doHttpStuff(int sock)
 {
-  buffer[2048] = '\0';
+  data.buffer[2048] = '\0';
   printf("Doing HTTP stuff for socket %i\n", sock);
-  ssize_t receivedSize = recv(sock, buffer, 2048, 0);
+  ssize_t receivedSize = recv(sock, data.buffer, 4096, 0);
   if(receivedSize == -1)
   {
     perror("recv()");
     return -1;
   }
   char *eol = NULL;
-  eol = memchr(buffer, '\n', 2048);
-  if(eol != buffer && eol != NULL && eol[-1] == '\r')
+  eol = memchr(data.buffer, '\n', 2048);
+  if(eol != data.buffer && eol != NULL && eol[-1] == '\r')
     eol--;
   if(eol == NULL) {
     /* URL too long for IE so it's too long for us */
@@ -121,14 +126,14 @@ int doHttpStuff(int sock)
     return -1;
   }
 
-  if(strncmp(buffer, "GET ", 4) != 0)
+  if(strncmp(data.buffer, "GET ", 4) != 0)
   {
     char *error = "HTTP/1.0 501 Not Implemented\r\n";
     send(sock, error, strlen(error), 0);
     return -1;
   }
 
-  char *startOfString = buffer + 4;
+  char *startOfString = data.buffer + 4;
   char *spaceChar = memchr(startOfString, ' ', 2048-4);
   if(spaceChar == NULL)
   {
@@ -141,7 +146,7 @@ int doHttpStuff(int sock)
 
   /* Error if there's a .. in it or doesn't start with / */
   if(strstr(startOfString, "/../") || strncmp(startOfString, "../", 3) == 0 ||
-      (spaceChar >= buffer + 3 && strncmp(spaceChar - 3, "/..", 3) == 0) ||
+      (spaceChar >= data.buffer + 3 && strncmp(spaceChar - 3, "/..", 3) == 0) ||
       *startOfString != '/')
   {
     /* Evil path */
@@ -157,23 +162,23 @@ int doHttpStuff(int sock)
   }
 
   int endsWithNewline = 0;
-  if(buffer[receivedSize-1] == '\n')
+  if(data.buffer[receivedSize-1] == '\n')
     endsWithNewline = 1;
   while(1)
   {
-    int len = recv(sock, buffer, 2048, 0);
-    if(endsWithNewline && len > 0 && (buffer[0] == '\n' || buffer[1] == '\n'))
+    int len = recv(sock, data.buffer, 2048, 0);
+    if(endsWithNewline && len > 0 && (data.buffer[0] == '\n' || data.buffer[1] == '\n'))
       return serveFile(sock, startOfString);
     if(len == -1)
     {
       perror("recv()");
       return -1;
     }
-    if(strstr(buffer, "\n\n") || strstr(buffer, "\r\n\r\n"))
+    if(strstr(data.buffer, "\n\n") || strstr(data.buffer, "\r\n\r\n"))
     {
       return serveFile(sock, startOfString);
     }
-    if(len >= 1 && buffer[len-1] == '\n')
+    if(len >= 1 && data.buffer[len-1] == '\n')
       endsWithNewline = 1;
   }
 
@@ -183,6 +188,8 @@ int doHttpStuff(int sock)
 
 int main(int argc, char **argv)
 {
+  data.evilAdminVariable = 0;
+  data.rootPath = "/home/muzer/public_html";
   int listenSock = initSocket();
   if(listenSock == -1)
     return 1;

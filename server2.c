@@ -49,7 +49,7 @@ int serveFile(int sock, char *path)
     send(sock, response, strlen(response), 0);
     return 1;
   }
-  char fullPath[2048+strlen(rootPath)+11]; /* 11 is length of "/index.html" */
+  char fullPath[2048+strlen(rootPath)+11];
   strncpy(fullPath, rootPath, 2048+strlen(rootPath)+11);
   strncat(fullPath, path, 2048+strlen(rootPath)+11);
   printf("Serving path %s\n", fullPath);
@@ -138,17 +138,6 @@ int doHttpStuff(int sock)
   }
 
   *spaceChar = '\0'; /* make it a real string */
-
-  /* Error if there's a .. in it or doesn't start with / */
-  if(strstr(startOfString, "/../") || strncmp(startOfString, "../", 3) == 0 ||
-      (spaceChar >= buffer + 3 && strncmp(spaceChar - 3, "/..", 3) == 0) ||
-      *startOfString != '/')
-  {
-    /* Evil path */
-    char *error = "HTTP/1.0 400 Bad Request\r\n";
-    send(sock, error, strlen(error), 0);
-    return -1;
-  }
 
   if(strstr(spaceChar + 1, "\n\n") || strstr(spaceChar + 1, "\r\n\r\n"))
   {
